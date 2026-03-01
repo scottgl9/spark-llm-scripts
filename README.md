@@ -7,11 +7,17 @@ Scripts, patches, and Dockerfiles for running local LLM inference servers on the
 ## Quick start
 
 ```bash
-# Serve Qwen3-Coder-Next-FP8 with all tool-call patches applied (v23 image)
+# Serve by model name — picks the best available script automatically
+./run.sh                       # defaults to qwen3-coder-next
+./run.sh qwen3-coder-next      # Qwen3-Coder-Next-FP8 via v23 (~46-47 tok/s)
+./run.sh qwen3-next            # Qwen3-Next-NVFP4 (~65-70 tok/s)
+./run.sh qwen35-coder
+
+# Or run a specific script directly
 bash servers/qwen3-coder-next-fp8/run-v23.sh
 ```
 
-That's it. The script auto-builds patched vLLM files and mounts them into the container.
+The run scripts auto-build patched vLLM files on first launch and mount them into the container.
 
 ---
 

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# run.sh — Launch the best available server for a given model.
+#
+# Usage:
+#   ./run.sh [MODEL]
+#
+# MODEL aliases (case-insensitive, partial match supported):
+#   qwen3-coder-next   → servers/qwen3-coder-next-fp8/run-v23.sh  (~46-47 tok/s)
+#   qwen3-next         → servers/qwen3-next-nvfp4/run.sh           (~65-70 tok/s)
+#   qwen35-coder       → servers/qwen35-coder-nvfp4/run.sh
+#   qwen3-coder-nvfp4  → servers/qwen3-coder-next-nvfp4/run.sh
+#
+# If no MODEL is given, defaults to qwen3-coder-next (recommended).
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Known model-serving container names — stopped before launching a new one
+MODEL_CONTAINERS=(
+  qwen3-fp8-server
+  qwen3-next-server
+  qwen35-coder-server
+  qwen3-coder-nvfp4-server
+)
+
+stop_model_containers() {
+  for cname in "${MODEL_CONTAINERS[@]}"; do
+    if docker ps --format '{{.Names}}' | grep -q "^${cname}$"; then
+      echo "==> Stopping running container '$cname'..."
+      docker stop "$cname" 2>/dev/null || true
+      docker rm "$cname" 2>/dev/null || true
+    fi
+  done
+}
+
+usage() {
+  cat <<EOF
+Usage: $0 [MODEL]
+
+Available models:
+  qwen3-coder-next    Qwen3-Coder-Next-FP8   via v23 container  (~46-47 tok/s)  [DEFAULT]
+  qwen3-next          Qwen3-Next-NVFP4        via NVFP4 container (~65-70 tok/s)
+  qwen35-coder        Qwen3.5-Coder-NVFP4    via NVFP4 container
+  qwen3-coder-nvfp4   Qwen3-Coder-Next-NVFP4 via NVFP4 container
+
+Examples:
+  $0                   # defaults to qwen3-coder-next
+  $0 qwen3-coder-next
+  $0 qwen3-next
+EOF
+}
+
+MODEL="${1:-qwen3-coder-next}"
+MODEL="${MODEL,,}"  # lowercase
+
+stop_model_containers
+
+case "$MODEL" in
+  qwen3-coder-next*|coder-next*|qwen3-coder-fp8*)
+    exec bash "$SCRIPT_DIR/servers/qwen3-coder-next-fp8/run-v23.sh"
+    ;;
+  qwen3-next*|qwen3next*)
+    exec bash "$SCRIPT_DIR/servers/qwen3-next-nvfp4/run.sh"
+    ;;
+  qwen35-coder*|qwen3.5-coder*|qwen35coder*)
+    exec bash "$SCRIPT_DIR/servers/qwen35-coder-nvfp4/run.sh"
+    ;;
+  qwen3-coder-nvfp4*|coder-nvfp4*)
+    exec bash "$SCRIPT_DIR/servers/qwen3-coder-next-nvfp4/run.sh"
+    ;;
+  *)
+    echo "Error: unknown model '$1'"
+    echo
+    usage
+    exit 1
+    ;;
+esac

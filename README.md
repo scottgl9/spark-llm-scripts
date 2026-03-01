@@ -1,6 +1,8 @@
-# local-llm-scripts
+# spark-llm-scripts
 
-Scripts, patches, and Dockerfiles for running local LLM inference servers on DGX hardware.
+Scripts, patches, and Dockerfiles for running local LLM inference servers on the **NVIDIA DGX Spark**.
+
+> Hardware target: NVIDIA DGX Spark (GB10 Superchip, SM_121 / SM_120 arch, 128 GB unified memory)
 
 ## Quick start
 
@@ -16,7 +18,7 @@ That's it. The script auto-builds patched vLLM files and mounts them into the co
 ## Repository structure
 
 ```
-local-llm-scripts/
+spark-llm-scripts/
 ├── patches/                   # vLLM source patches (see patches/README.md)
 │   ├── apply.sh               # Apply patches to a running container
 │   ├── build.sh               # Generate .build/<version>/ from originals + .patch files
@@ -29,14 +31,14 @@ local-llm-scripts/
 │   │   ├── run-v23.sh         # avarok/dgx-vllm-nvfp4-kernel:v23 (recommended)
 │   │   └── run-v11.sh         # avarok/vllm-dgx-spark:v11
 │   ├── qwen3-coder-next-nvfp4/
-│   │   └── run.sh             # dgx-vllm-mtp-ready:v23 + MTP speculative decoding
+│   │   └── run.sh             # avarok/dgx-vllm-nvfp4-kernel:v23 + MTP speculative decoding
 │   ├── qwen3-next-nvfp4/
 │   │   └── run.sh             # nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4
 │   └── qwen35-coder-nvfp4/
 │       └── run.sh             # vincentzed-hf/Qwen3-Coder-Next-NVFP4 (v11)
 ├── images/
 │   └── dgx-vllm-nvfp4-kernel/
-│       └── v23/Dockerfile     # Custom image with all patches baked in
+│       └── v23/Dockerfile     # Custom image with all patches baked in (alternative to -v mounts)
 ├── docs/
 │   └── TOOL_CALL_BUGS.md      # Full root-cause analysis of the 3 tool-call bugs
 ├── .build/                    # (gitignored) Generated patched files for volume mounting
@@ -65,13 +67,12 @@ bash patches/build.sh v23    # builds v23 only
 
 ---
 
-## Images
+## DGX Spark images
 
 | Image | vLLM path in container | Use case |
 |-------|----------------------|----------|
 | `avarok/dgx-vllm-nvfp4-kernel:v23` | `/app/vllm/vllm/` | FP8 and NVFP4 models — recommended |
 | `avarok/vllm-dgx-spark:v11` | `/opt/venv/lib/python3.12/site-packages/vllm/` | Older, fallback |
-| `dgx-vllm-mtp-ready:v23` (local build) | `/app/vllm/vllm/` | NVFP4 + MTP speculative decoding |
 
 > ⚠️ **The vLLM install path differs between v23 and v11.** A wrong mount path means patches are silently ignored.
 > Verify the active path with:
@@ -87,21 +88,22 @@ bash patches/build.sh v23    # builds v23 only
 |--------|-------|-------|
 | `servers/qwen3-coder-next-fp8/run-v23.sh` | `avarok/dgx-vllm-nvfp4-kernel:v23` | `Qwen/Qwen3-Coder-Next-FP8` |
 | `servers/qwen3-coder-next-fp8/run-v11.sh` | `avarok/vllm-dgx-spark:v11` | `Qwen/Qwen3-Coder-Next-FP8` |
-| `servers/qwen3-coder-next-nvfp4/run.sh` | `dgx-vllm-mtp-ready:v23` | `Sehyo/Qwen3.5-122B-A10B-NVFP4` |
-| `servers/qwen3-next-nvfp4/run.sh` | `dgx-vllm-mtp-ready:v23` | `nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4` |
+| `servers/qwen3-coder-next-nvfp4/run.sh` | `avarok/dgx-vllm-nvfp4-kernel:v23` | `Sehyo/Qwen3.5-122B-A10B-NVFP4` + MTP |
+| `servers/qwen3-next-nvfp4/run.sh` | `avarok/dgx-vllm-nvfp4-kernel:v23` | `nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4` |
 | `servers/qwen35-coder-nvfp4/run.sh` | `avarok/vllm-dgx-spark:v11` | `vincentzed-hf/Qwen3-Coder-Next-NVFP4` |
 
 ---
 
-## Known bugs and fixes
+## Patches included
 
-See [docs/TOOL_CALL_BUGS.md](docs/TOOL_CALL_BUGS.md) for full root-cause analysis of three vLLM bugs that cause tool calls to fail or return empty arguments with `Qwen3-Coder-Next` models.
+| Patch | Versions | What it fixes |
+|-------|----------|--------------|
+| `entrypoints/chat_utils.py` | v23, v11 | Tool call args left as JSON string — Jinja2 `\|items` TypeError |
+| `tool_parsers/qwen3coder_tool_parser.py` | v23, v11 | `IndexError` on stream finish + arguments always streamed as `{}` |
+| `model_executor/layers/quantization/modelopt.py` | v23 | NVFP4 MTP layer exclusion — `mtp.fc` missed by wildcard → shape mismatch |
+| `model_executor/models/qwen3_5_mtp.py` | v23 | Clamp OOB token IDs from padded vocab during MTP draft sampling |
 
-| # | File | Symptom | Root cause |
-|---|------|---------|------------|
-| 1 | `chat_utils.py` | `TypeError: Can only get item pairs from a mapping` | Arguments left as JSON string instead of dict; Jinja2 `\|items` requires a mapping |
-| 2 | `qwen3coder_tool_parser.py` | `IndexError: list index out of range` | `streamed_args_for_tool` list declared but never populated |
-| 3 | `qwen3coder_tool_parser.py` | Tool arguments always `{}` | `</function>` closing tag seen before parameter streaming loop runs |
+See [docs/TOOL_CALL_BUGS.md](docs/TOOL_CALL_BUGS.md) for full root-cause analysis.
 
 ---
 
@@ -130,3 +132,11 @@ bash patches/apply.sh qwen3-fp8-server v23
 ```
 
 Note: requires a container restart to reload the Python files after copying.
+
+---
+
+## Clone
+
+```bash
+git clone git@github.com:scottgl9/spark-llm-scripts.git
+```

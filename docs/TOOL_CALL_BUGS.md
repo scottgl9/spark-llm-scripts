@@ -1,12 +1,12 @@
 # vLLM Tool Call Bug Report — Qwen3-Coder-Next-FP8 + OpenClaw
 
-**Container:** `qwen3-fp8-server` (`avarok/vllm-dgx-spark:v11`)  
-**Model:** `Qwen/Qwen3-Coder-Next-FP8`  
-**Tool parser:** `qwen3_coder` (`--tool-call-parser qwen3_coder`)  
-**Client:** OpenClaw (OpenAI-compatible, strict mode tools)  
-**vLLM install path:** `/opt/venv/lib/python3.12/site-packages/vllm/` (NOT `/app/vllm/vllm/`)  
-**Date:** 2026-03-01  
-**Status:** ✅ All 3 bugs fixed and verified. Tool calls stream correctly with full arguments (`{"location": "San Francisco", "unit": "celsius"}`). Zero errors in server logs.
+**Container:** `qwen3-fp8-server` (`avarok/dgx-vllm-nvfp4-kernel:v23`)
+**Model:** `Qwen/Qwen3-Coder-Next-FP8`
+**Tool parser:** `qwen3_coder` (`--tool-call-parser qwen3_coder`)
+**Client:** opencode (OpenAI-compatible, strict mode tools)
+**vLLM install path:** `/app/vllm/vllm/` (v23 container)
+**Date:** 2026-03-01
+**Status:** ✅ All 4 bugs fixed and verified. Tool calls stream correctly with full arguments. Zero errors in server logs.
 
 ---
 
@@ -246,4 +246,57 @@ Run scripts mount to the **correct** installed path:
 -v ~/dgx-vllm/patches/vllm/tool_parsers/qwen3coder_tool_parser.py:/opt/venv/lib/python3.12/site-packages/vllm/tool_parsers/qwen3coder_tool_parser.py:ro
 ```
 
-> ⚠️ If the image is rebuilt or the container is re-created without the run script, patches are lost. Both bugs should be submitted upstream to `vllm-project/vllm`.
+> ⚠️ If the image is rebuilt or the container is re-created without the run script, patches are lost. These bugs should be submitted upstream to `vllm-project/vllm`.
+
+---
+
+## Bug 4 — Doubled JSON Arguments in Streaming (v23)
+
+### Symptom
+Every streaming tool call has arguments doubled:
+```json
+{"command": "git log --oneline -20""command": "git log --oneline -20", "description": "Show recent git commits"}
+```
+opencode error: `JSON parsing failed ... JSON Parse error: Expected '}'`
+
+### Root Cause
+The Bug 3 fix introduced `closing_frag = args_json[1:]` to stream the complete args when `</function>` fires. However, individual parameters may have already been streamed via the `param_count` loop before `</function>` was detected. The closing fragment resent all params without accounting for what was already in the stream.
+
+Additionally, `streamed_args_for_tool[index]` was only updated when `{` was sent — not when individual param fragments were sent — so the tracker was always incomplete.
+
+### Fix
+
+**File:** `patches/vllm/v23/tool_parsers/qwen3coder_tool_parser.py` (via `.build/v23/`)
+
+**Change 1 — Track param fragments in `streamed_args_for_tool`:**
+```python
+# After: self.param_count += 1
+if self.current_tool_index < len(self.streamed_args_for_tool):
+    self.streamed_args_for_tool[self.current_tool_index] += json_fragment
+```
+
+**Change 2 — Compute closing_frag from what hasn't been streamed yet:**
+```python
+# BEFORE (Bug 3 fix — incorrect):
+closing_frag = args_json[1:] if self.json_started else args_json
+
+# AFTER:
+if self.current_tool_index < len(self.streamed_args_for_tool):
+    already_streamed = self.streamed_args_for_tool[self.current_tool_index]
+    closing_frag = args_json[len(already_streamed):]
+    if not closing_frag:
+        closing_frag = "}"
+elif self.json_started:
+    closing_frag = args_json[1:]
+else:
+    closing_frag = args_json
+```
+
+`already_streamed` contains `{` + any individually-streamed param fragments. `args_json[len(already_streamed):]` yields only the unstreamed tail (remaining params + closing `}`).
+
+### Verification
+```bash
+curl -s http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{...stream:true, tools:[bash]...}'
+# Streaming argument deltas should be: { → "command": "..." → , "description": "..." → }
+# Assembles to: {"command": "...", "description": "..."} — valid, no doubling
+```

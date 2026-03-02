@@ -64,9 +64,9 @@ docker run -d \
   -e VLLM_TEST_FORCE_FP8_MARLIN=1 \
   -e MODEL=Qwen/Qwen3-Coder-Next-FP8 \
   -e PORT=8000 \
-  -e GPU_MEMORY_UTIL=0.86 \
+  -e GPU_MEMORY_UTIL=0.85 \
   -e MAX_MODEL_LEN=131072 \
-  -e MAX_NUM_SEQS=4 \
+  -e MAX_NUM_SEQS=3 \
   -e VLLM_EXTRA_ARGS="--served-model-name qwen3-coder-next --kv-cache-dtype fp8_e4m3 --stream-interval 5 --enable-chunked-prefill --enable-prefix-caching --max-num-batched-tokens 8192 --enable-auto-tool-choice --tool-call-parser qwen3_coder" \
   "${IMAGE}" \
   serve

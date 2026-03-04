@@ -300,3 +300,93 @@ curl -s http://localhost:8000/v1/chat/completions -H "Content-Type: application/
 # Streaming argument deltas should be: { → "command": "..." → , "description": "..." → }
 # Assembles to: {"command": "...", "description": "..."} — valid, no doubling
 ```
+
+---
+
+## Bug 5 — `!!!!` in Thinking Output with Qwen3.5-NVFP4 MTP Speculative Decoding
+
+**Date:** 2026-03-03
+**Status:** 🔍 Root cause under investigation; OOB clamp + DISABLE_MTP toggle committed (738482578)
+
+### Symptom
+When using the Qwen3.5-NVFP4 preset (`./vllm.sh Qwen3.5-NVFP4`) with opencode or openclaw, the model's thinking/reasoning output shows repeated `!` characters instead of meaningful content. Only affects the Qwen3.5-NVFP4 preset, which is the only preset using MTP speculative decoding (`--speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'`).
+
+### Key Finding: Token 0 = `"!"`
+In the Qwen3.5 tokenizer, **token ID 0 decodes to `"!"`**. Any mechanism that produces token 0 (zero-initialized tensors, default argmax on uniform/zero logits, masked embeddings) will output `!`.
+
+```python
+>>> tok.encode("!")
+[0]
+>>> tok.decode([0])
+'!'
+>>> tok.encode("!!!!")
+[16582]  # multi-char token for "!!!!"
+```
+
+### Ruled Out: NVFP4 Quantization of MTP Weights
+
+The MTP weights are **NOT quantized**. The checkpoint's `quantization_config.ignore` list explicitly excludes MTP layers:
+
+```json
+"ignore": [
+    ...
+    "re:mtp\\.layers\\.\\d+\\.",
+    "mtp.fc",
+    ...
+]
+```
+
+Verified in the checkpoint — all MTP weights in `extra_weights.safetensors` are `torch.bfloat16`:
+```
+mtp.fc.weight: torch.bfloat16 [3072, 6144]
+mtp.layers.0.mlp.experts.0.down_proj.weight: torch.bfloat16 [3072, 1024]
+...
+```
+
+The compressed-tensors ignore list correctly matches the MTP module paths. When the MTP model is loaded via `EagleProposer._get_model()` (eagle.py:1269), no prefix is added (default `prefix=""`), so module paths are `mtp.fc`, `mtp.layers.0.self_attn.qkv_proj`, etc. — matching the ignore patterns. The layers use `UnquantizedLinearMethod`.
+
+**Note:** `DraftModelProposer._get_model()` (draft_model.py:54) adds `prefix="draft_model"`, which would cause paths like `draft_model.mtp.fc` that **fail** to match the ignore regex (anchored with `re.match()`). This is a latent bug but does NOT affect the current code path — MTP models use EagleProposer, not DraftModelProposer.
+
+### Ruled Out: OOB Token IDs from Padded Vocabulary
+
+`LogitsProcessor._get_logits()` slices logits to `org_vocab_size` before returning (logits_processor.py:103), so `argmax()` in `_greedy_sample()` should only produce valid indices. The clamp added in commit 738482578 is defensive but unlikely to trigger in practice.
+
+### Ruled Out: Dead Code in eagle.py Hidden State Selection
+
+The branch at eagle.py:506-511 that checks for `"deepseek_mtp"`, `"ernie_mtp"`, etc. is **dead code** — all MTP method names get normalized to `"mtp"` at speculative.py:331-335 before reaching this check. However, the `else` branch (using draft model output as carry-forward state) is actually correct for iterative MTP prediction, since the target model hasn't computed hidden states for speculative positions.
+
+### Suspected Root Cause: Distribution Mismatch (Target NVFP4 ↔ MTP bf16)
+
+The MTP model was trained alongside the full-precision target model. Its `forward()` concatenates the input token embedding with the **target model's hidden states** (qwen3_next_mtp.py:111-114):
+
+```python
+inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+hidden_states = self.pre_fc_norm_hidden(hidden_states)  # ← target model's hidden states
+hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+hidden_states = self.fc(hidden_states)
+```
+
+The NVFP4-quantized target model produces subtly different hidden states compared to full precision. The bf16 MTP model receives these "off-distribution" hidden states and produces poor draft tokens. With `num_speculative_tokens=2`, the second draft uses the MTP's own degraded output as context, compounding the error.
+
+**However**, speculative decoding verification should override bad drafts with the target model's correct tokens. This means either:
+1. The `!!!!` tokens are somehow being **accepted** by the target model (unlikely but possible if the thinking distribution is flat), or
+2. There's a bug in how rejected draft tokens interact with the output stream, or
+3. The MTP model's KV cache writes during failed speculation are corrupting subsequent target model inference
+
+### Changes Made (commit 738482578)
+
+| File | Change |
+|------|--------|
+| `vllm/model_executor/models/qwen3_5_mtp.py` | Defensive `input_ids.clamp(0, self.vocab_size - 1)` before `embed_input_ids` |
+| `vllm/model_executor/models/qwen3_next_mtp.py` | Same clamp for consistency |
+| `vllm.sh` | `DISABLE_MTP` env var toggle in `cmd_qwen35_nvfp4()` |
+
+### Diagnostic Next Steps
+
+1. **`DISABLE_MTP=1 ./vllm.sh Qwen3.5-NVFP4`** — confirm thinking output is normal without MTP
+2. **Add logging** to `EagleProposer.propose()` to measure:
+   - MTP acceptance rate (% of draft tokens accepted by target model)
+   - Distribution of proposed token IDs (are they token 0?)
+   - Whether `!` tokens are proposed-and-rejected or proposed-and-accepted
+3. **Check MTP hidden state norms** — if target NVFP4 hidden states have different magnitude than what MTP expects, the `fc` projection could saturate/collapse
+4. If MTP quality is confirmed as the cause, disable MTP by default in the preset (Step 3 of the original plan)

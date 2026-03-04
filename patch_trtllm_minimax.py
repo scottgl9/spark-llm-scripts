@@ -799,6 +799,7 @@ apply_patch(
     '            module.scalar_alpha = alpha.item()\n'
     '        if weight_scale_2 is not None:\n'
     '            copy_weight(module.weight_scale_2, weight_scale_2)\n'
+    '\n'
     '        fused_weight = torch.cat((q_weight, k_weight, v_weight))',
     '        # [P22] NaN calibration guard: force dynamic quantization for fused QKV\n'
     '        if input_scale is not None:\n'
@@ -810,6 +811,7 @@ apply_patch(
     '            module.scalar_alpha = alpha.item()\n'
     '        if weight_scale_2 is not None:\n'
     '            copy_weight(module.weight_scale_2, weight_scale_2)\n'
+    '\n'
     '        fused_weight = torch.cat((q_weight, k_weight, v_weight))'
 )
 

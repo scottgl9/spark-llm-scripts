@@ -249,7 +249,7 @@ apply_patch(
     '                    if fb not in weights: return None\n'
     '                    v = weights[fb]\n'
     '                    v32 = v.to(_torch.float32) if isinstance(v, _torch.Tensor) else _torch.tensor(float(v))\n'
-    '                    if v32.item() == 0.0:  # dead/uncalibrated expert (amax_input=0)\n'
+    '                    if v32.isnan().item() or v32.item() < 1e-6:  # dead/NaN/subnormal expert\n'
     '                        return _torch.tensor(0.0)  # contributes 0 to max; fc31_input_scale uses live experts only\n'
     '                    return _torch.reciprocal(v32 * 6.0)  # 1/(6*igs) = amax_input/2688\n'
     '                w1_input_scale = _isc("w1")\n'

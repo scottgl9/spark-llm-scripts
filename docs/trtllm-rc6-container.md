@@ -189,6 +189,31 @@ Detected NaN/Inf in KVCache
 ```
 **Root cause:** Using `QuantAlgo.NVFP4` (W4A4, wrong algorithm) instead of `W4A8_NVFP4_FP8`, and scale values not inverted. See patches 9–11.
 
+### Error 8 — 41/62 MoE modules with uninitialized scales (fc31_input_scale=1, fc31_alpha=1)
+
+After correcting the quantization algorithm, MoE output was still wildly wrong. The `[MOE_DBG]` prints showed 41 of 62 layers had `fc31_input_scale=1.0` and `fc31_alpha=1.0` (init values, never loaded).
+
+**Root cause:** `_load_weights_impl` uses `run_concurrently` (ThreadPoolExecutor). After `MiniMaxM2MoE.load_weights` returns, the caller calls `ConsumableWeightsDict.mark_consumed('model.layers.N.block_sparse_moe')`, which **deletes every key** beginning with that prefix — including all expert weight keys. A concurrent thread assigned `block_sparse_moe.experts` may not have run yet; when it does, `filter_weights` returns an empty dict → `CutlassFusedMoE.load_weights` is skipped → `fc31_input_scale` / `fc31_alpha` stay at 1.0.
+
+**Fix (Patch 18):** Inside `MiniMaxM2MoE.load_weights`, extract the `experts.*` sub-dict from the snapshot (a plain Python dict captured before `mark_consumed` runs) and call `self.experts.load_weights()` directly. A `_weights_loaded_by_parent` flag prevents a redundant second load if the concurrent thread happens to run first.
+
+**Result:** All 62 MoE modules now load correctly (none show `fc31_input_scale=1`).
+
+### Error 9 — Sampling CUDA assert / NaN logits (layer 61 and layer 57)
+
+After Patch 18, the server still triggered `torch._assert_async(~torch.any(torch.isnan(logits)))` in `sampling_utils_flashinfer.py`.
+
+**Root cause — layer 61:** Eight experts in layer 61 have `NaN` values for `input_global_scale` in the checkpoint itself (bad calibration data). `_isc` returned `tensor(nan)`, which propagated through `max(tmp)` → `reciprocal(nan)` → `fc31_input_scale = nan` → NaN in MoE output → NaN logits.
+
+**Root cause — layer 57:** Experts 86 and 126 have `input_global_scale ≈ 6.45e-27` (near-zero subnormal, also bad calibration). The previous zero-guard (`v32.item() == 0.0`) did not catch subnormals. `1/(6 × 6.45e-27) ≈ 2.58e+25` → `fc31_input_scale ≈ 3.87e-26` → effectively zeroed quantization → wrong MoE output.
+
+**Fix (Patch 4c updated):** Changed the guard from `v32.item() == 0.0` to:
+```python
+if v32.isnan().item() or v32.item() < 1e-6:  # dead/NaN/subnormal expert
+    return torch.tensor(0.0)  # contributes 0 to max; fc31_input_scale uses live experts only
+```
+This causes NaN and near-zero subnormal experts to be excluded from the `max(tmp)` computation, so `fc31_input_scale` is derived only from valid experts.
+
 ---
 
 ## Prerequisites
@@ -272,7 +297,7 @@ All patches live in `~/spark-llm-scripts/patch_trtllm_minimax.py` and are applie
 | 3 | linear.py | `NVFP4LinearMethod.load_weight_scales`: map `weight_packed/input_global_scale/weight_global_scale` → TRT-LLM keys with correct scale conversion |
 | 4a | quantization.py | `load_expert_weights`: fallback `weight_packed→weight` per expert |
 | 4b | quantization.py | `load_quant_scales`: accept `weight_global_scale`, convert to `amax_weight/2688` |
-| 4c | quantization.py | `load_quant_scales`: accept `input_global_scale`, convert to `amax_input/2688` |
+| 4c | quantization.py | `load_quant_scales`: accept `input_global_scale`, convert to `amax_input/2688`; skip NaN/subnormal experts (checkpoint calibration anomalies in layers 57 and 61) |
 | 5 | linear.py | `NVFP4.load_weights_vanilla`: normalize `weight_packed→weight` before helper |
 | 6 | linear.py | `NVFP4.load_weights_fused_qkv_linear`: normalize keys |
 | 7 | linear.py | `NVFP4.load_weights_fused_gate_up_linear`: normalize keys |
@@ -287,17 +312,34 @@ All patches live in `~/spark-llm-scripts/patch_trtllm_minimax.py` and are applie
 | 14 | quantization.py | MoE `load_expert_fc31_alpha_nvfp4`: relax `w1==w3 weight_scale_2` assertion |
 | 15 | linear.py | `NVFP4._input_prepare`: debug hook (prints scale values on first call) |
 | 16 | quantization.py | MoE `load_expert_fc31_input_scale_nvfp4`: relax `w1==w3 input_scale` assertion |
+| 17 | fused_moe_cutlass.py | `quantize_input`: MoE debug hook — prints `fc31_input_scale`, alpha, NaN flag on first call |
+| 18 | modeling_minimaxm2.py | `MiniMaxM2MoE.load_weights`: load expert weights from snapshot to avoid `ConsumableWeightsDict` race |
+| 19 | sampling_utils_flashinfer.py | Print logit stats before NaN assert to distinguish model NaN vs other failures |
+| 20 | modeling_minimaxm2.py | `MiniMaxM2Model.forward`: NaN check after each decoder layer to identify first NaN-producing layer |
 
 ---
 
 ## Known Remaining Issues / Next Steps
 
-1. **Remove Patch 15 (debug hook)** once coherent output is confirmed. It prints to stdout
-   on first call of each NVFP4 linear layer which is verbose but harmless.
+1. **Remove debug patches (15, 17, 19, 20)** once coherent output is confirmed.
+   - Patch 15: prints scale values on first call of each NVFP4 linear layer (verbose)
+   - Patch 17: prints MoE fc31_input_scale / alpha / NaN flag on first call (verbose)
+   - Patch 19: prints logit stats only when NaN is present (low noise, useful to keep briefly)
+   - Patch 20: prints the first NaN-producing layer (low noise, useful to keep briefly)
 
 2. **NaN in KVCache warmup**: The server logs `NaNs/Infs have been introduced to KVCache
    during warmup` — this is a known TRT-LLM warning and does not block inference (KVCache
    is zeroed out after warmup). Monitor whether inference output is coherent.
 
-3. **Test inference quality**: Run a few prompts to confirm non-null, coherent output.
-   The NaN chain from MoE should be fixed by Patches 14 and 16.
+3. **Checkpoint calibration anomalies (fixed by Patch 4c)**:
+   - Layer 61: 8 experts have `NaN` `input_global_scale` (bad calibration in checkpoint)
+   - Layer 57: experts 86 and 126 have `input_global_scale ≈ 6.45e-27` (near-zero subnormal)
+   - These are treated as "dead experts" (contribute 0 to the `max()` used to compute
+     `fc31_input_scale`) so they are excluded from the shared quantization scale.
+
+4. **Test inference quality**: Run a few prompts to confirm non-null, coherent output:
+   ```bash
+   docker exec trtllm-minimax curl -s http://127.0.0.1:8000/v1/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"saricles/MiniMax-M2.5-REAP-139B-A10B-NVFP4-GB10","prompt":"The capital of France is","max_tokens":20}'
+   ```

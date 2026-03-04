@@ -748,4 +748,60 @@ apply_patch(
     '                    print(f"[NAN_LAYER] First NaN at layer {_layer_idx}: hs_nan={_hs_nan} res_nan={_res_nan} hs_mag={hidden_states.float().abs().mean().item():.4g}", flush=True)'
 )
 
+# ---------------------------------------------------------------------------
+# Patch 21: linear.py — NVFP4LinearMethod.load_weights_vanilla:
+#            After copying input_scale, check for NaN (bad calibration data
+#            in the checkpoint — layer 61 q/k/v/o_proj all have NaN
+#            input_global_scale).  When NaN is detected, set
+#            module.force_dynamic_quantization = True so _input_prepare
+#            will compute the scale from the actual input tensor instead.
+#            This MUST run at weight-load time, NOT at inference time, because
+#            inference runs inside a CUDA graph where .item() / .any() with CPU
+#            synchronisation causes cudaErrorStreamCaptureUnsupported.
+# ---------------------------------------------------------------------------
+print("=== Patch 21: linear.py (NVFP4 load_weights_vanilla: force_dynamic when input_scale is NaN) ===")
+apply_patch(
+    LINEAR,
+    'NVFP4LinearMethod.load_weights_vanilla: force_dynamic_quantization when input_scale is NaN',
+    '        if input_scale is not None:\n'
+    '            copy_weight(module.input_scale, input_scale)\n'
+    '            E2M1_MAX = 6.0\n'
+    '            module.inv_input_scale.data = module.input_scale / E2M1_MAX',
+    '        if input_scale is not None:\n'
+    '            copy_weight(module.input_scale, input_scale)\n'
+    '            E2M1_MAX = 6.0\n'
+    '            module.inv_input_scale.data = module.input_scale / E2M1_MAX\n'
+    '            if module.input_scale.isnan().any().item():  # bad calibration data\n'
+    '                module.force_dynamic_quantization = True'
+)
+
+# ---------------------------------------------------------------------------
+# Patch 22: linear.py — NVFP4LinearMethod.load_weights_fused_qkv_linear:
+#            Same NaN→force_dynamic guard as Patch 21, for the fused QKV path
+#            (layer 61's q/k/v projections are loaded here).
+# ---------------------------------------------------------------------------
+print("=== Patch 22: linear.py (NVFP4 load_weights_fused_qkv: force_dynamic when input_scale is NaN) ===")
+apply_patch(
+    LINEAR,
+    'NVFP4LinearMethod.load_weights_fused_qkv_linear: force_dynamic_quantization when input_scale is NaN',
+    '        if input_scale is not None:\n'
+    '            copy_weight(module.input_scale, input_scale)\n'
+    '        if alpha is not None:\n'
+    '            copy_weight(module.alpha, alpha)\n'
+    '            module.scalar_alpha = alpha.item()\n'
+    '        if weight_scale_2 is not None:\n'
+    '            copy_weight(module.weight_scale_2, weight_scale_2)\n'
+    '        fused_weight = torch.cat((q_weight, k_weight, v_weight))',
+    '        if input_scale is not None:\n'
+    '            copy_weight(module.input_scale, input_scale)\n'
+    '            if module.input_scale.isnan().any().item():  # bad calibration data\n'
+    '                module.force_dynamic_quantization = True\n'
+    '        if alpha is not None:\n'
+    '            copy_weight(module.alpha, alpha)\n'
+    '            module.scalar_alpha = alpha.item()\n'
+    '        if weight_scale_2 is not None:\n'
+    '            copy_weight(module.weight_scale_2, weight_scale_2)\n'
+    '        fused_weight = torch.cat((q_weight, k_weight, v_weight))'
+)
+
 print("\n=== All patches applied successfully! ===")

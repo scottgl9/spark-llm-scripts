@@ -57,6 +57,8 @@ docker run -d \
   --gpus all \
   --ipc=host \
   --oom-score-adj 800 \
+  --memory 119g \
+  --memory-swap 125g \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   -v ~/.cache/vllm_compilers/triton:/root/.triton \
   -v ~/.cache/vllm_compilers/nv:/root/.nv \
@@ -82,18 +84,23 @@ docker run -d \
   -e VLLM_USE_FLASHINFER_MOE_FP4=0 \
   -e VLLM_TEST_FORCE_FP8_MARLIN=1 \
   -e VLLM_NVFP4_GEMM_BACKEND=marlin \
-  -e VLLM_MARLIN_USE_ATOMIC_ADD=1 \
   -e VLLM_USE_DEEP_GEMM=0 \
-  -e SAFETENSORS_FAST_GPU=1 \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -e MODEL=Sehyo/Qwen3.5-122B-A10B-NVFP4 \
   -e PORT=8000 \
-  -e GPU_MEMORY_UTIL=0.90 \
+  -e GPU_MEMORY_UTIL=0.9 \
   -e MAX_MODEL_LEN=131072 \
-  -e MAX_NUM_SEQS=4 \
-  -e VLLM_EXTRA_ARGS="--speculative-config.method qwen3_next_mtp --speculative-config.num_speculative_tokens 3 --attention-backend flashinfer --kv-cache-dtype fp8 --enable-chunked-prefill --max-num-batched-tokens 8192 --enable-prefix-caching --prefix-caching-hash-algo xxhash --performance-mode throughput --swap-space 0 --safetensors-load-strategy eager --language-model-only --trust-remote-code --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --served-model-name qwen3-coder-next" \
+  -e MAX_NUM_SEQS=8 \
+  -e VLLM_EXTRA_ARGS="--speculative-config.method mtp --speculative-config.num_speculative_tokens 2 --attention-backend flashinfer --kv-cache-dtype fp8 --enable-chunked-prefill --max-num-batched-tokens 8192 --enable-prefix-caching --language-model-only --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --served-model-name qwen3-coder-next" \
   ${IMAGE} \
   serve
+
+#--swap-space 0
+#--speculative-config.method qwen3_next_mtp
+#-e SAFETENSORS_FAST_GPU=1 \
+# -e VLLM_MARLIN_USE_ATOMIC_ADD=1 \
+#-e MODEL=scottgl/Qwen3.5-122B-A10B-MTP-NVFP4 \
+#-e MODEL=Sehyo/Qwen3.5-122B-A10B-NVFP4 \
 
 echo "==> Container started. Logs:"
 echo "    docker logs -f $CONTAINER_NAME"

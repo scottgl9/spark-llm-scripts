@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # run-v23.sh — Launch Sehyo/Qwen3.5-122B-A10B-NVFP4 on avarok/dgx-vllm-nvfp4-kernel:v23
-# Applies 7 volume-mounted patches: chat_utils, qwen3coder_tool_parser, modelopt,
+# Applies 8 volume-mounted patches: chat_utils, qwen3coder_tool_parser, modelopt,
 # qwen3_5_mtp (OOB clamp + gate_up_proj fix), qwen3_reasoning_parser, serving.py,
-# compressed_tensors_moe (GB10 SM121 MoE weight clone workaround, vllm PR #36183).
+# compressed_tensors_moe (GB10 SM121 MoE weight clone workaround, vllm PR #36183),
+# qwen3_5 (fix GDN in_proj_ba/qkvz pre-packed weight loading + mlp.gate guard).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +22,8 @@ if [[ ! -f "$BUILD_DIR/entrypoints/chat_utils.py" || \
       ! -f "$BUILD_DIR/model_executor/models/qwen3_5_mtp.py" || \
       ! -f "$BUILD_DIR/reasoning/qwen3_reasoning_parser.py" || \
       ! -f "$BUILD_DIR/entrypoints/openai/chat_completion/serving.py" || \
-      ! -f "$BUILD_DIR/quantization/compressed_tensors/compressed_tensors_moe.py" ]]; then
+      ! -f "$BUILD_DIR/quantization/compressed_tensors/compressed_tensors_moe.py" || \
+      ! -f "$BUILD_DIR/model_executor/models/qwen3_5.py" ]]; then
   echo "==> Building patched vLLM files..."
   bash "$REPO_ROOT/patches/build.sh" "$VERSION"
 fi
@@ -50,6 +52,7 @@ docker run -d \
   -v "$BUILD_DIR/reasoning/qwen3_reasoning_parser.py:$VLLM_BASE/reasoning/qwen3_reasoning_parser.py:ro" \
   -v "$BUILD_DIR/entrypoints/openai/chat_completion/serving.py:$VLLM_BASE/entrypoints/openai/chat_completion/serving.py:ro" \
   -v "$BUILD_DIR/quantization/compressed_tensors/compressed_tensors_moe.py:$VLLM_BASE/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py:ro" \
+  -v "$BUILD_DIR/model_executor/models/qwen3_5.py:$VLLM_BASE/model_executor/models/qwen3_5.py:ro" \
   -e VLLM_USE_FLASHINFER_MOE_FP4=0 \
   -e VLLM_TEST_FORCE_FP8_MARLIN=1 \
   -e VLLM_NVFP4_GEMM_BACKEND=marlin \

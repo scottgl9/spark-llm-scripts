@@ -1,8 +1,8 @@
 --- a/qwen3_5.py
 +++ b/qwen3_5.py
-@@ -402,6 +402,22 @@
-                 if name is None:
-                     continue
+@@ -397,6 +397,22 @@
+             if name.startswith("mtp."):
+                 continue
  
 +            # NVFP4 checkpoints store GDN projection weights pre-packed:
 +            # "in_proj_ba" and "in_proj_qkvz" already merged into one tensor.
@@ -23,7 +23,7 @@
              for param_name, weight_name, shard_id in stacked_params_mapping:
                  if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                      is_fused_expert = True
-@@ -410,6 +426,11 @@
+@@ -405,6 +421,11 @@
                  if weight_name not in name:
                      continue
  

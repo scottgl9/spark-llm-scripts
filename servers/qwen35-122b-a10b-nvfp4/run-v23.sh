@@ -86,7 +86,7 @@ docker run -d \
   -e MODEL=Sehyo/Qwen3.5-122B-A10B-NVFP4 \
   -e PORT=8000 \
   -e GPU_MEMORY_UTIL=0.88 \
-  -e MAX_MODEL_LEN=131072 \
+  -e MAX_MODEL_LEN=65536 \
   -e MAX_NUM_SEQS=2 \
   -e VLLM_EXTRA_ARGS="--speculative-config.method qwen3_next_mtp --speculative-config.num_speculative_tokens 3 --attention-backend flashinfer --kv-cache-dtype fp8 --enable-chunked-prefill --max-num-batched-tokens 8192 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --served-model-name qwen3-coder-next" \
   ${IMAGE} \
